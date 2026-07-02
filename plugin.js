@@ -1,11 +1,12 @@
 // ============================================================
-// 插件：AI 玩具控制 v6.0 (ANKNI MX)
+// 插件：AI 玩具控制 v6.1 (ANKNI MX)
 // 功能：
 //   1. 解析 char 消息中的 <vi> 标签，自动控制 ANKNI MX 蓝牙玩具
-//   2. 双电机独立控制（吮吸 + 震动），支持序列播放
+//   2. 双电机独立控制（吮吸 + 震动），支持序列循环播放
 //   3. 聊天会话绑定，实时监控新消息
 //   4. 手动控制 + 向绑定会话注入用户消息
 //   5. 后台运行，页面切换不中断
+//   6. BLE 适配层：自动检测 Web Bluetooth / Capacitor BLE 环境
 // 协议：AA 01 02 [吮吸] [震动] [校验和]，校验和 = 前5字节之和 & 0xFF
 // ============================================================
 (function() {
@@ -28,10 +29,11 @@
   // ============================================================
   const state = {
     // 蓝牙
-    device: null,
-    server: null,
-    writeChar: null,
-    notifyChar: null,
+    device: null,        // Web Bluetooth 设备对象
+    deviceId: null,      // Capacitor BLE 设备ID
+    server: null,        // Web Bluetooth GATT 服务器
+    writeChar: null,     // Web Bluetooth 写特征值
+    notifyChar: null,    // Web Bluetooth 通知特征值
     isConnected: false,
 
     // Roche
@@ -50,7 +52,7 @@
 
     // 序列播放器
     sequenceGen: 0,         // 代际计数器，用于取消旧序列
-    currentSequence: null,  // { steps, index, source }
+    currentSequence: null,  // { steps, index, source, loop }
 
     // 当前值
     currentSuction: 0,
@@ -67,7 +69,7 @@
     onValuesChange: null,
 
     // 清理追踪
-    cleanup: { listeners: [], intervals: [], timeouts: [], visibilityHandler: null }
+    cleanup: { listeners: [], intervals: [], timeouts: [], visibilityHandler: null, capacitorListeners: [] }
   };
 
   // ============================================================
@@ -93,6 +95,10 @@
     const id = setTimeout(fn, ms);
     state.cleanup.timeouts.push(id);
     return id;
+  }
+  // 注册 Capacitor 插件监听器（用于清理）
+  function trackCapacitorListener(handle) {
+    if (handle) state.cleanup.capacitorListeners.push(handle);
   }
 
   // ============================================================
@@ -184,35 +190,12 @@
   }
 
   // ============================================================
-  // 蓝牙连接管理
+  // 通知数据处理 & 断开处理（Web/Capacitor 共享逻辑）
   // ============================================================
-  async function connectBluetooth() {
-    try {
-      updateStatus('正在搜索蓝牙设备...');
-      const dev = await navigator.bluetooth.requestDevice({
-        filters: [{ name: DEVICE_NAME }],
-        optionalServices: [SERVICE_UUID]
-      });
-      state.device = dev;
-      updateStatus('正在连接 GATT...');
-
-      dev.addEventListener('gattserverdisconnected', onDisconnected);
-      state.cleanup.listeners.push({ target: dev, event: 'gattserverdisconnected', handler: onDisconnected });
-
-      state.server = await dev.gatt.connect();
-      updateStatus('正在获取服务...');
-      await setupCharacteristics();
-      await setupNotifyListener();
-      state.isConnected = true;
-      updateStatus('✅ 已连接: ' + DEVICE_NAME);
-
-      if (state.autoMonitor && state.boundConvId) startMonitor();
-      return true;
-    } catch (e) {
-      updateStatus('❌ 连接失败: ' + e.message, true);
-      state.isConnected = false;
-      return false;
-    }
+  function handleNotifyData(data) {
+    state.lastNotifyData = data;
+    const parsed = parseNotify(data);
+    if (state.onNotifyData) state.onNotifyData(parsed || { raw: formatHex(data) });
   }
 
   function onDisconnected() {
@@ -223,47 +206,214 @@
     updateStatus('蓝牙已断开连接', true);
   }
 
-  async function setupCharacteristics() {
-    if (!state.server) return;
-    state.writeChar = null;
-    state.notifyChar = null;
-    try {
-      const svc = await state.server.getPrimaryService(SERVICE_UUID);
-      state.writeChar = await svc.getCharacteristic(WRITE_UUID);
-      try {
-        state.notifyChar = await svc.getCharacteristic(NOTIFY_UUID);
-      } catch (e) {
-        state.notifyChar = null;
-      }
-    } catch (e) {
-      throw new Error('获取 ANKNI MX 服务失败: ' + e.message);
-    }
-  }
+  // ============================================================
+  // BLE 适配层
+  // 自动检测环境：
+  //   - 浏览器环境：使用 navigator.bluetooth (Web Bluetooth API)
+  //   - Capacitor 环境：使用 window.Capacitor.Plugins.BluetoothLe
+  // 提供统一的 BLE 接口，屏蔽底层差异
+  // ============================================================
+  const BLE = {
+    mode: null,     // 'web' | 'capacitor'
+    capBle: null,   // Capacitor BLE 插件引用
 
-  async function setupNotifyListener() {
-    if (!state.notifyChar) return;
+    // 检测当前环境是否支持 BLE
+    isAvailable() {
+      // 浏览器环境：Web Bluetooth API
+      if (typeof navigator !== 'undefined' && navigator.bluetooth) {
+        this.mode = 'web';
+        return true;
+      }
+      // Capacitor 环境：@capacitor-community/bluetooth-le
+      if (typeof window !== 'undefined' &&
+          window.Capacitor &&
+          window.Capacitor.Plugins &&
+          window.Capacitor.Plugins.BluetoothLe) {
+        this.mode = 'capacitor';
+        this.capBle = window.Capacitor.Plugins.BluetoothLe;
+        return true;
+      }
+      this.mode = null;
+      return false;
+    },
+
+    // 请求设备
+    // Web Bluetooth 返回设备对象；Capacitor 返回 deviceId 字符串
+    async requestDevice(name) {
+      if (this.mode === 'web') {
+        const dev = await navigator.bluetooth.requestDevice({
+          filters: [{ name }],
+          optionalServices: [SERVICE_UUID]
+        });
+        state.device = dev;
+        // 监听断开事件
+        dev.addEventListener('gattserverdisconnected', onDisconnected);
+        state.cleanup.listeners.push({ target: dev, event: 'gattserverdisconnected', handler: onDisconnected });
+        return dev;
+      } else {
+        // Capacitor: 先初始化插件
+        await this.capBle.initialize();
+        const result = await this.capBle.requestDevice({
+          filters: [{ name }]
+        });
+        state.deviceId = result.deviceId;
+        return result.deviceId;
+      }
+    },
+
+    // 连接设备
+    // deviceId: Web Bluetooth 传入设备对象，Capacitor 传入 deviceId 字符串
+    async connect(deviceId) {
+      if (this.mode === 'web') {
+        state.server = await deviceId.gatt.connect();
+        // 发现服务和特征值
+        try {
+          const svc = await state.server.getPrimaryService(SERVICE_UUID);
+          state.writeChar = await svc.getCharacteristic(WRITE_UUID);
+          try {
+            state.notifyChar = await svc.getCharacteristic(NOTIFY_UUID);
+          } catch (e) {
+            state.notifyChar = null;
+          }
+        } catch (e) {
+          throw new Error('获取 ANKNI MX 服务失败: ' + e.message);
+        }
+      } else {
+        await this.capBle.connect({ deviceId });
+        state.deviceId = deviceId;
+        // 监听断开事件
+        const handle = await this.capBle.addListener('disconnected', (event) => {
+          if (event.deviceId === state.deviceId) onDisconnected();
+        });
+        trackCapacitorListener(handle);
+      }
+    },
+
+    // 写入数据（data 是 Uint8Array）
+    async write(data) {
+      if (this.mode === 'web') {
+        if (!state.writeChar) throw new Error('未连接或特征值未就绪');
+        if (state.writeChar.properties.writeWithoutResponse) {
+          await state.writeChar.writeValueWithoutResponse(data);
+        } else if (state.writeChar.properties.write) {
+          await state.writeChar.writeValue(data);
+        } else {
+          throw new Error('特征值不支持写入');
+        }
+      } else {
+        if (!state.deviceId) throw new Error('未连接');
+        // 创建独立 ArrayBuffer 副本，避免 byteOffset 问题
+        const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        const dataView = new DataView(ab);
+        await this.capBle.write({
+          deviceId: state.deviceId,
+          service: SERVICE_UUID,
+          characteristic: WRITE_UUID,
+          value: dataView
+        });
+      }
+    },
+
+    // 开始通知订阅
+    // callback 接收 Uint8Array 参数
+    async startNotifications(callback) {
+      if (this.mode === 'web') {
+        if (!state.notifyChar) {
+          console.log('Notify 特征值不可用，跳过订阅');
+          return;
+        }
+        try {
+          await state.notifyChar.startNotifications();
+          const handler = (event) => {
+            callback(new Uint8Array(event.target.value.buffer));
+          };
+          state.notifyChar.addEventListener('characteristicvaluechanged', handler);
+          state.cleanup.listeners.push({ target: state.notifyChar, event: 'characteristicvaluechanged', handler });
+        } catch (e) {
+          console.log('Notify 订阅失败:', e);
+        }
+      } else {
+        if (!state.deviceId) return;
+        try {
+          await this.capBle.startNotifications({
+            deviceId: state.deviceId,
+            service: SERVICE_UUID,
+            characteristic: NOTIFY_UUID
+          });
+          // 事件名格式: notification|service|characteristic
+          const eventName = `notification|${SERVICE_UUID}|${NOTIFY_UUID}`;
+          const handle = await this.capBle.addListener(eventName, (event) => {
+            // event.value 是 DataView
+            callback(new Uint8Array(event.value.buffer));
+          });
+          trackCapacitorListener(handle);
+        } catch (e) {
+          console.log('Notify 订阅失败:', e);
+        }
+      }
+    },
+
+    // 断开连接
+    async disconnect() {
+      if (this.mode === 'web') {
+        if (state.device && state.device.gatt && state.device.gatt.connected) {
+          state.device.gatt.disconnect();
+        }
+      } else {
+        if (state.deviceId) {
+          try { await this.capBle.disconnect({ deviceId: state.deviceId }); } catch (e) {}
+        }
+      }
+    },
+
+    // 检查是否已连接
+    isConnected() {
+      if (this.mode === 'web') {
+        return !!(state.device && state.device.gatt && state.device.gatt.connected);
+      } else {
+        return !!state.deviceId && state.isConnected;
+      }
+    }
+  };
+
+  // ============================================================
+  // 蓝牙连接管理
+  // ============================================================
+  async function connectBluetooth() {
     try {
-      await state.notifyChar.startNotifications();
-      const handler = (event) => {
-        const data = new Uint8Array(event.target.value.buffer);
-        state.lastNotifyData = data;
-        const parsed = parseNotify(data);
-        if (state.onNotifyData) state.onNotifyData(parsed || { raw: formatHex(data) });
-      };
-      state.notifyChar.addEventListener('characteristicvaluechanged', handler);
-      state.cleanup.listeners.push({ target: state.notifyChar, event: 'characteristicvaluechanged', handler });
+      // 检测环境
+      if (!BLE.isAvailable()) {
+        updateStatus('❌ 当前环境不支持蓝牙（需要 Web Bluetooth 或 Capacitor BLE）', true);
+        return false;
+      }
+      const modeLabel = BLE.mode === 'web' ? 'Web蓝牙' : 'Capacitor BLE';
+      updateStatus(`正在搜索蓝牙设备 (${modeLabel})...`);
+
+      const dev = await BLE.requestDevice(DEVICE_NAME);
+      updateStatus('正在连接...');
+
+      await BLE.connect(dev);
+      updateStatus('正在设置通知...');
+
+      await BLE.startNotifications(handleNotifyData);
+      state.isConnected = true;
+      updateStatus('✅ 已连接: ' + DEVICE_NAME + ' (' + modeLabel + ')');
+
+      if (state.autoMonitor && state.boundConvId) startMonitor();
+      return true;
     } catch (e) {
-      console.log('Notify 订阅失败:', e);
+      updateStatus('❌ 连接失败: ' + e.message, true);
+      state.isConnected = false;
+      return false;
     }
   }
 
   function disconnectBluetooth() {
     stopMonitor();
     cancelSequence();
-    if (state.device && state.device.gatt && state.device.gatt.connected) {
-      state.device.gatt.disconnect();
-    }
+    BLE.disconnect().catch(() => {});
     state.device = null;
+    state.deviceId = null;
     state.server = null;
     state.writeChar = null;
     state.notifyChar = null;
@@ -274,20 +424,13 @@
 
   // 发送指令到玩具
   async function sendCmd(suction, vibration) {
-    if (!state.isConnected || !state.writeChar) {
+    if (!state.isConnected) {
       updateStatus('未连接蓝牙', true);
       return false;
     }
     try {
       const data = buildCommand(suction, vibration);
-      if (state.writeChar.properties.writeWithoutResponse) {
-        await state.writeChar.writeValueWithoutResponse(data);
-      } else if (state.writeChar.properties.write) {
-        await state.writeChar.writeValue(data);
-      } else {
-        updateStatus('特征值不支持写入', true);
-        return false;
-      }
+      await BLE.write(data);
       return true;
     } catch (e) {
       updateStatus('发送失败: ' + e.message, true);
@@ -296,14 +439,10 @@
   }
 
   async function sendStop() {
-    if (!state.isConnected || !state.writeChar) return false;
+    if (!state.isConnected) return false;
     try {
       const data = buildStopCommand();
-      if (state.writeChar.properties.writeWithoutResponse) {
-        await state.writeChar.writeValueWithoutResponse(data);
-      } else if (state.writeChar.properties.write) {
-        await state.writeChar.writeValue(data);
-      }
+      await BLE.write(data);
       return true;
     } catch (e) {
       return false;
@@ -314,6 +453,7 @@
   // 序列播放器
   // 一条消息中可能有多个 <vi> 标签，按顺序播放
   // 有 d 属性则等待指定秒数后执行下一个；无 d 则立即执行并保持
+  // 多步序列播放完成后自动循环，直到被取消
   // 新消息到来或用户手动控制时，取消当前序列
   // ============================================================
   function cancelSequence() {
@@ -325,42 +465,78 @@
   async function playSequence(steps, source) {
     cancelSequence(); // 取消旧序列
     if (!steps || steps.length === 0) return;
-    const myGen = state.sequenceGen;
-    state.currentSequence = { steps, index: 0, source };
 
-    for (let i = 0; i < steps.length; i++) {
+    const myGen = state.sequenceGen;
+    // 多步序列自动循环播放
+    const shouldLoop = steps.length > 1;
+    state.currentSequence = { steps, index: 0, source, loop: 1 };
+
+    let loopCount = 0;
+    while (true) {
       // 被取消则退出
       if (myGen !== state.sequenceGen) return;
-      state.currentSequence.index = i;
-      const step = steps[i];
-      updateSequenceStatus(`播放序列 ${i + 1}/${steps.length}（来源：${source}）`);
+      loopCount++;
+      state.currentSequence.loop = loopCount;
 
-      if (step.type === 'stop') {
-        await sendStop();
-        updateValues(0, 0);
-        updateLastCmd(`序列 [${i + 1}/${steps.length}] 停止`);
-      } else {
-        const ok = await sendCmd(step.suction, step.vibration);
-        if (ok) {
-          updateValues(step.suction, step.vibration);
-          updateLastCmd(`序列 [${i + 1}/${steps.length}] 吸${step.suction} 震${step.vibration}`);
+      for (let i = 0; i < steps.length; i++) {
+        // 被取消则退出
+        if (myGen !== state.sequenceGen) return;
+        state.currentSequence.index = i;
+        const step = steps[i];
+
+        // 执行步骤
+        if (step.type === 'stop') {
+          if (shouldLoop) {
+            updateSequenceStatus(`循环播放中 第${loopCount}轮 [${i + 1}/${steps.length}] 停止`);
+          } else {
+            updateSequenceStatus('停止');
+          }
+          await sendStop();
+          updateValues(0, 0);
+          updateLastCmd(shouldLoop
+            ? `循环[${loopCount}轮 ${i + 1}/${steps.length}] 停止`
+            : '停止');
+        } else {
+          if (shouldLoop) {
+            updateSequenceStatus(`循环播放中 第${loopCount}轮 [${i + 1}/${steps.length}] 吸${step.suction} 震${step.vibration}`);
+          } else {
+            updateSequenceStatus(`吸${step.suction} 震${step.vibration}`);
+          }
+          const ok = await sendCmd(step.suction, step.vibration);
+          if (ok) {
+            updateValues(step.suction, step.vibration);
+            updateLastCmd(shouldLoop
+              ? `循环[${loopCount}轮 ${i + 1}/${steps.length}] 吸${step.suction} 震${step.vibration}`
+              : `吸${step.suction} 震${step.vibration}`);
+          }
+        }
+
+        // 被取消则退出
+        if (myGen !== state.sequenceGen) return;
+
+        // 等待持续时间
+        if (step.duration > 0) {
+          if (shouldLoop) {
+            updateSequenceStatus(`循环播放中 第${loopCount}轮 [${i + 1}/${steps.length}] 保持 ${step.duration}秒...`);
+          }
+          await sleep(step.duration * 1000);
+          if (myGen !== state.sequenceGen) return;
+        } else if (i < steps.length - 1) {
+          // 无持续时间且非最后步骤，短暂延时避免指令过快
+          await sleep(100);
+          if (myGen !== state.sequenceGen) return;
         }
       }
 
-      // 被取消则退出
-      if (myGen !== state.sequenceGen) return;
-
-      // 如果有持续时间且不是最后一个，则等待
-      if (step.duration > 0 && i < steps.length - 1) {
-        updateSequenceStatus(`序列 [${i + 1}/${steps.length}] 保持 ${step.duration}秒...`);
-        await sleep(step.duration * 1000);
-        if (myGen !== state.sequenceGen) return;
+      // 单步序列不循环，播放完成即退出
+      if (!shouldLoop) {
+        if (myGen === state.sequenceGen) {
+          state.currentSequence = null;
+          updateSequenceStatus('序列播放完成');
+        }
+        return;
       }
-    }
-
-    if (myGen === state.sequenceGen) {
-      state.currentSequence = null;
-      updateSequenceStatus('序列播放完成');
+      // 多步序列：继续下一轮（while 循环自动进行）
     }
   }
 
@@ -424,9 +600,6 @@
       msgs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 
       // 从最新向最旧扫描，找到第一条未处理的 char 消息（含 <vi> 标签）
-      // 若同一时间有多条新消息，则取最早一条未处理的，按顺序处理
-      // 简化：找到所有 timestamp > lastProcessedTs 的 char 消息，按时间升序处理最后一条的序列
-      // 实际：处理最近一条包含 <vi> 的新 char 消息
       let targetMsg = null;
       for (let i = msgs.length - 1; i >= 0; i--) {
         const msg = msgs[i];
@@ -553,10 +726,27 @@
             color: var(--text);
           }
           .roche-plugin-toy .subtitle {
-            margin: 0 0 12px 0;
+            margin: 0 0 10px 0;
             font-size: 11px;
             color: var(--text-mute);
           }
+          .roche-plugin-toy .exit-bar {
+            margin-bottom: 12px;
+          }
+          .roche-plugin-toy .exit-bar button {
+            width: 100%;
+            background: var(--red);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 11px 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.15s, transform 0.05s;
+          }
+          .roche-plugin-toy .exit-bar button:hover { opacity: 0.88; }
+          .roche-plugin-toy .exit-bar button:active { transform: scale(0.97); }
           .roche-plugin-toy section {
             background: var(--bg-card);
             border: 1px solid var(--border);
@@ -702,8 +892,13 @@
           .roche-plugin-toy .help li { margin: 2px 0; }
         </style>
         <div class="roche-plugin-toy">
-          <h3>🤖 AI 玩具控制 v6.0</h3>
-          <p class="subtitle">ANKNI MX · 双电机独立控制 · &lt;vi&gt; 标签实时监控</p>
+          <!-- 顶部退出按钮（显眼） -->
+          <div class="exit-bar">
+            <button id="toy-close">🚪 退出插件</button>
+          </div>
+
+          <h3>🤖 AI 玩具控制 v6.1</h3>
+          <p class="subtitle">ANKNI MX · 双电机独立控制 · &lt;vi&gt; 标签实时监控 · 序列循环</p>
 
           <!-- 聊天绑定 -->
           <section>
@@ -788,14 +983,12 @@
                 <li><code>&lt;vi s="0" v="2"/&gt;</code> — 仅震动</li>
                 <li><code>&lt;vi stop/&gt;</code> — 停止所有</li>
               </ul>
-              一条消息中可放多个 <code>&lt;vi&gt;</code> 形成序列，按顺序播放。
+              一条消息中放多个 <code>&lt;vi&gt;</code> 形成序列，按顺序播放并<strong>自动循环</strong>。
               <br><br>
               <strong>手动控制</strong>会取消当前序列，并向绑定会话注入一条用户消息
               （如：<code>（调整了玩具设置：吮吸3 震动2）</code>），让 char 知道你做了什么。
             </div>
           </section>
-
-          <button class="gray btn-block" id="toy-close">返回</button>
         </div>
       `;
 
@@ -849,13 +1042,16 @@
         notifyDataDiv.scrollTop = notifyDataDiv.scrollHeight;
       };
 
-      // 通知状态显示
+      // 通知状态显示（兼容 Web Bluetooth 和 Capacitor BLE）
       function refreshNotifyStatus() {
         if (!state.isConnected) {
           notifyStatusDiv.textContent = '等待连接...';
           notifyStatusDiv.style.color = 'var(--text-mute)';
+        } else if (BLE.mode === 'capacitor') {
+          notifyStatusDiv.textContent = '🔔 已订阅通知 (Capacitor BLE)，正在接收数据...';
+          notifyStatusDiv.style.color = 'var(--green)';
         } else if (state.notifyChar) {
-          notifyStatusDiv.textContent = '🔔 已订阅通知，正在接收数据...';
+          notifyStatusDiv.textContent = '🔔 已订阅通知 (Web Bluetooth)，正在接收数据...';
           notifyStatusDiv.style.color = 'var(--green)';
         } else {
           notifyStatusDiv.textContent = '⚠️ 未找到 Notify 特征';
@@ -986,7 +1182,7 @@
         }
       };
 
-      // 关闭
+      // 退出插件（用 trackListener 确保事件正确绑定和清理）
       trackListener($('#toy-close'), 'click', () => roche.ui.closeApp());
 
       // 设置可见性处理器
@@ -1023,8 +1219,12 @@
       for (const id of state.cleanup.timeouts) {
         clearTimeout(id);
       }
+      // 清理 Capacitor 插件监听器
+      for (const handle of state.cleanup.capacitorListeners) {
+        try { if (handle && handle.remove) handle.remove(); } catch (e) {}
+      }
       // 重置清理记录
-      state.cleanup = { listeners: [], intervals: [], timeouts: [], visibilityHandler: null };
+      state.cleanup = { listeners: [], intervals: [], timeouts: [], visibilityHandler: null, capacitorListeners: [] };
 
       // 清空回调
       state.onStatusChange = null;
@@ -1045,8 +1245,8 @@
   window.RochePlugin.register({
     id: 'ai-toy-controller',
     name: 'AI 玩具控制 (ANKNI MX)',
-    version: '6.0.0',
-    description: 'ANKNI MX 双电机独立控制 - 实时监控聊天 <vi> 指令自动控制玩具，支持序列播放与消息注入。',
+    version: '6.1.0',
+    description: 'ANKNI MX 双电机独立控制 - 实时监控聊天 <vi> 指令自动控制玩具，支持序列循环播放与消息注入，兼容 Web Bluetooth / Capacitor BLE。',
     author: 'Roche 社区',
     apps: [pluginApp]
   });
@@ -1054,6 +1254,7 @@
   // 调试接口
   window.__toyController = {
     state,
+    BLE,
     connect: connectBluetooth,
     disconnect: disconnectBluetooth,
     send: sendCmd,
