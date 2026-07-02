@@ -1,8 +1,8 @@
 {
   "id": "ai-toy-controller",
   "name": "AI 玩具控制 (ANKNI MX)",
-  "version": "6.0.0",
-  "description": "ANKNI MX 双电机独立控制 - 实时监控聊天指令自动控制玩具",
+  "version": "6.1.0",
+  "description": "ANKNI MX 双电机独立控制 - 序列循环播放，兼容Web Bluetooth和Capacitor BLE",
   "author": "Roche 社区",
   "entry": "https://raw.githubusercontent.com/yechen1844/roche-toy-plugin/main/plugin.js",
   "hash": "",
