@@ -1,0 +1,10 @@
+{
+  "id": "ai-toy-controller",
+  "name": "AI 玩具控制 (ANKNI MX)",
+  "version": "6.0.0",
+  "description": "ANKNI MX 双电机独立控制 - 实时监控聊天指令自动控制玩具",
+  "author": "Roche 社区",
+  "entry": "https://raw.githubusercontent.com/yechen1844/roche-toy-plugin/main/plugin.js",
+  "hash": "",
+  "permissions": ["storage", "ui", "conversation:read", "memory:read", "persona:read"]
+}
