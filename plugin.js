@@ -70,6 +70,8 @@
 
     // 清理追踪
     cleanup: { listeners: [], intervals: [], timeouts: [], visibilityHandler: null, capacitorListeners: [] },
+    // 持久监听器（unmount 不清理，跨 app 生命周期存活）
+    persistentListeners: [],
 
     // 悬浮球（全局，独立于 app 生命周期）
     floatingBall: null,
@@ -303,7 +305,8 @@
   }
   // 注册 Capacitor 插件监听器（用于清理）
   function trackCapacitorListener(handle) {
-    if (handle) state.cleanup.capacitorListeners.push(handle);
+    // BLE 监听器是持久的，unmount 不清理
+    if (handle) state.persistentListeners.push(handle);
   }
 
   // ============================================================
@@ -868,7 +871,7 @@
     if (state.monitorInterval) clearInterval(state.monitorInterval);
     if (!state.boundConvId || !state.isConnected) return;
     state.isMonitoring = true;
-    state.monitorInterval = trackInterval(checkMessages, POLL_FOREGROUND);
+    state.monitorInterval = setInterval(checkMessages, POLL_FOREGROUND);
     if (state.roche) {
       try { state.roche.storage.set('toyAutoMonitor', true); } catch (e) {}
     }
@@ -898,7 +901,7 @@
         state.monitorInterval = null;
       }
       const ms = document.hidden ? POLL_BACKGROUND : POLL_FOREGROUND;
-      state.monitorInterval = trackInterval(checkMessages, ms);
+      state.monitorInterval = setInterval(checkMessages, ms);
     };
     document.addEventListener('visibilitychange', handler);
     state.cleanup.visibilityHandler = { target: document, event: 'visibilitychange', handler };
@@ -914,6 +917,9 @@
     async mount(container, roche) {
       state.roche = roche;
       state.container = container;
+
+      // 首次 mount 时恢复配置 + 创建悬浮球
+      restoreConfig(roche);
 
       // 加载持久化设置
       if (roche.storage) {
@@ -1428,15 +1434,15 @@
     },
 
     async unmount(container) {
-      // 注意：退出 app 时 NOT 停止监控/BLE，悬浮球继续工作
+      // 重要：退出 app 时 NOT 停止监控/BLE，悬浮球继续工作
       // 只清理 app UI 相关的监听器，核心逻辑保持运行
       cancelSequence();
 
-      // 清理所有事件监听
+      // 清理 app UI 事件监听（不影响 BLE 和监控）
       for (const { target, event, handler } of state.cleanup.listeners) {
         try { target.removeEventListener(event, handler); } catch (e) {}
       }
-      // 清理可见性监听
+      // 清理可见性监听（下次 mount 会重新设置）
       if (state.cleanup.visibilityHandler) {
         try {
           state.cleanup.visibilityHandler.target.removeEventListener(
@@ -1445,19 +1451,13 @@
           );
         } catch (e) {}
       }
-      // 清理所有 interval
-      for (const id of state.cleanup.intervals) {
-        clearInterval(id);
-      }
-      // 清理所有 timeout
+      // 注意：不清理 monitorInterval（已改为 setInterval，不在 cleanup.intervals 里）
+      // 注意：不清理 persistentListeners（BLE 监听器，跨 app 生命周期存活）
+      // 只清理 UI 相关的 timeout
       for (const id of state.cleanup.timeouts) {
         clearTimeout(id);
       }
-      // 清理 Capacitor 插件监听器
-      for (const handle of state.cleanup.capacitorListeners) {
-        try { if (handle && handle.remove) handle.remove(); } catch (e) {}
-      }
-      // 重置清理记录
+      // 重置 UI 清理记录（但不重置 persistentListeners）
       state.cleanup = { listeners: [], intervals: [], timeouts: [], visibilityHandler: null, capacitorListeners: [] };
 
       // 清空回调
@@ -1479,38 +1479,28 @@
   window.RochePlugin.register({
     id: 'ai-toy-controller',
     name: 'AI 玩具控制 (ANKNI MX)',
-    version: '6.4.0',
+    version: '6.4.1',
     description: 'ANKNI MX 双电机独立控制 - 悬浮球常驻，实时监控聊天 <vi> 指令自动控制玩具，支持序列循环播放与消息注入，兼容 Web Bluetooth / Capacitor BLE。',
     author: 'Roche 社区',
     apps: [pluginApp]
   });
 
   // ============================================================
-  // 插件加载后：创建悬浮球 + 恢复配置（独立于 app 生命周期）
+  // 插件加载后：恢复配置（roche API 只在 mount 时才可用）
   // ============================================================
-  async function initOnLoad() {
-    // 等待 Roche API 就绪
-    let roche = null;
-    try { roche = window.RochePlugin.getAPI ? window.RochePlugin.getAPI() : (window.roche || null); } catch(e) {}
-    if (!roche) {
-      // 延迟重试
-      setTimeout(initOnLoad, 500);
-      return;
-    }
-    state.roche = roche;
-
-    // 恢复持久化配置
+  let configRestored = false;
+  async function restoreConfig(roche) {
+    if (configRestored) return;
+    configRestored = true;
     try {
       const savedConv = await roche.storage.get('toyConversationId');
       const savedAuto = await roche.storage.get('toyAutoMonitor');
       if (savedConv) state.boundConvId = savedConv;
       if (savedAuto === true || savedAuto === 'true') state.autoMonitor = true;
     } catch(e) {}
-
-    // 创建悬浮球
+    // 创建悬浮球（只在第一次 mount 时创建，之后跨 app 生命周期存活）
     createFloatingBall();
   }
-  initOnLoad();
 
   // 调试接口
   window.__toyController = {
