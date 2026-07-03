@@ -94,9 +94,10 @@
       box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 999999;
       display: flex; align-items: center; justify-content: center;
       cursor: pointer; font-size: 28px; user-select: none;
-      transition: transform 0.2s; touch-action: none;
+      -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+      touch-action: none;
     `;
-    ball.innerHTML = '🎮';
+    ball.innerHTML = '<span style="pointer-events:none;">🎮</span>';
     ball.title = 'AI 玩具控制';
 
     // 状态指示点
@@ -105,35 +106,40 @@
       position: absolute; right: 4px; top: 4px;
       width: 12px; height: 12px; border-radius: 50%;
       background: #ff4444; border: 2px solid #fff;
+      pointer-events: none;
     `;
     ball.appendChild(dot);
     state.ballStateEl = dot;
 
-    ball.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleFloatingPanel();
-    });
+    // 拖拽 + 点击区分
+    let dragging = false, startX = 0, startY = 0, origRight = 0, origTop = 0, moved = false;
 
-    // 拖拽支持
-    let dragging = false, startX, startY, origRight, origTop;
-    ball.addEventListener('touchstart', (e) => {
-      dragging = true;
-      const t = e.touches[0];
-      startX = t.clientX; startY = t.clientY;
-      origRight = parseInt(ball.style.right);
-      origTop = parseInt(ball.style.top);
+    ball.addEventListener('pointerdown', (e) => {
+      dragging = true; moved = false;
+      startX = e.clientX; startY = e.clientY;
+      origRight = parseInt(ball.style.right) || 16;
+      origTop = parseInt(ball.style.top) || 45;
+      ball.setPointerCapture(e.pointerId);
       e.preventDefault();
     });
-    ball.addEventListener('touchmove', (e) => {
+    ball.addEventListener('pointermove', (e) => {
       if (!dragging) return;
-      const t = e.touches[0];
-      const dx = t.clientX - startX;
-      const dy = t.clientY - startY;
-      ball.style.right = Math.max(0, origRight - dx) + 'px';
-      ball.style.top = Math.max(0, origTop + dy) + 'px';
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
+      ball.style.right = Math.max(0, Math.min(window.innerWidth - 56, origRight - dx)) + 'px';
+      ball.style.top = Math.max(0, Math.min(window.innerHeight - 56, origTop + dy)) + 'px';
       e.preventDefault();
     });
-    ball.addEventListener('touchend', () => { dragging = false; });
+    ball.addEventListener('pointerup', (e) => {
+      if (dragging && !moved) {
+        // 点击（没拖动）
+        toggleFloatingPanel();
+      }
+      dragging = false;
+      try { ball.releasePointerCapture(e.pointerId); } catch(_) {}
+      e.preventDefault();
+    });
 
     document.body.appendChild(ball);
     state.floatingBall = ball;
@@ -154,48 +160,140 @@
     panel.id = 'toy-floating-panel';
     panel.style.cssText = `
       position: fixed; right: 16px; top: calc(45% + 70px);
-      width: 260px; background: #1e1e2e; color: #fff;
+      width: 280px; max-height: 80vh; overflow-y: auto;
+      background: #1e1e2e; color: #fff;
       border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
       z-index: 999998; padding: 14px; font-size: 13px;
       font-family: -apple-system, sans-serif;
+      -webkit-tap-highlight-color: transparent;
     `;
     panel.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
         <b style="font-size:15px;">🎮 玩具控制</b>
-        <span id="toy-fp-close" style="cursor:pointer;font-size:18px;opacity:0.7;">×</span>
+        <span id="toy-fp-close" style="cursor:pointer;font-size:20px;opacity:0.7;padding:4px 8px;">×</span>
       </div>
       <div id="toy-fp-status" style="margin-bottom:8px;padding:6px 8px;background:rgba(255,255,255,0.1);border-radius:8px;font-size:12px;">状态加载中...</div>
-      <div id="toy-fp-values" style="margin-bottom:8px;font-size:12px;">吮吸: 0 | 震动: 0</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-        <button id="toy-fp-connect" style="flex:1;min-width:90px;padding:8px;background:#4caf50;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">连接蓝牙</button>
-        <button id="toy-fp-stop" style="flex:1;min-width:90px;padding:8px;background:#f44336;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">停止玩具</button>
+
+      <div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+          <span>吮吸强度</span><span id="toy-fp-suc-val">0</span>
+        </div>
+        <input id="toy-fp-suc" type="range" min="0" max="9" value="0" style="width:100%;accent-color:#667eea;">
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="toy-fp-monitor" style="flex:1;min-width:90px;padding:8px;background:#2196f3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">启动监控</button>
-        <button id="toy-fp-app" style="flex:1;min-width:90px;padding:8px;background:#9c27b0;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">打开设置</button>
+      <div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+          <span>震动强度</span><span id="toy-fp-vib-val">0</span>
+        </div>
+        <input id="toy-fp-vib" type="range" min="0" max="9" value="0" style="width:100%;accent-color:#667eea;">
+      </div>
+
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+        <button id="toy-fp-send" style="flex:1;min-width:80px;padding:9px;background:#4caf50;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">发送指令</button>
+        <button id="toy-fp-stop" style="flex:1;min-width:80px;padding:9px;background:#f44336;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">停止</button>
+      </div>
+
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+        <button id="toy-fp-connect" style="flex:1;min-width:80px;padding:9px;background:#4caf50;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">连接蓝牙</button>
+        <button id="toy-fp-monitor" style="flex:1;min-width:80px;padding:9px;background:#2196f3;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">启动监控</button>
+      </div>
+
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+        <button id="toy-fp-preset" style="flex:1;min-width:80px;padding:8px;background:#ff9800;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">预设序列</button>
+        <button id="toy-fp-app" style="flex:1;min-width:80px;padding:8px;background:#9c27b0;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">打开设置</button>
+      </div>
+
+      <div id="toy-fp-presets" style="display:none;margin-bottom:8px;padding:8px;background:rgba(255,255,255,0.05);border-radius:8px;">
+        <div style="font-size:11px;opacity:0.7;margin-bottom:6px;">点击运行预设序列（循环播放）</div>
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <button class="toy-preset-btn" data-preset="wave" style="padding:6px;background:#37474f;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;">🌊 浪潮 (渐进)</button>
+          <button class="toy-preset-btn" data-preset="pulse" style="padding:6px;background:#37474f;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;">💥 脉冲 (快闪)</button>
+          <button class="toy-preset-btn" data-preset="tease" style="padding:6px;background:#37474f;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;">😈 挑逗 (慢起伏)</button>
+          <button class="toy-preset-btn" data-preset="max" style="padding:6px;background:#37474f;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;">🔥 最强 (3,3)</button>
+        </div>
       </div>
     `;
     document.body.appendChild(panel);
     state.floatingPanel = panel;
     state.ballPanelOpen = true;
 
-    // 绑定按钮
-    panel.querySelector('#toy-fp-close').onclick = closeFloatingPanel;
-    panel.querySelector('#toy-fp-connect').onclick = async () => {
+    // 阻止面板内部点击触发外部关闭
+    panel.addEventListener('click', (e) => e.stopPropagation());
+    panel.addEventListener('pointerdown', (e) => e.stopPropagation());
+
+    // 关闭按钮
+    const closeBtn = panel.querySelector('#toy-fp-close');
+    closeBtn.addEventListener('click', (e) => { e.stopPropagation(); closeFloatingPanel(); });
+    closeBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+
+    // 滑块实时显示数值
+    const sucSlider = panel.querySelector('#toy-fp-suc');
+    const vibSlider = panel.querySelector('#toy-fp-vib');
+    sucSlider.addEventListener('input', (e) => {
+      e.stopPropagation();
+      panel.querySelector('#toy-fp-suc-val').textContent = e.target.value;
+    });
+    vibSlider.addEventListener('input', (e) => {
+      e.stopPropagation();
+      panel.querySelector('#toy-fp-vib-val').textContent = e.target.value;
+    });
+
+    // 发送指令（并注入消息）
+    panel.querySelector('#toy-fp-send').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const s = parseInt(sucSlider.value, 10);
+      const v = parseInt(vibSlider.value, 10);
+      if (!state.isConnected) {
+        updateFloatingStatus('❌ 请先连接蓝牙', true);
+        return;
+      }
+      const ok = await sendCmd(s, v);
+      if (ok) {
+        updateValues(s, v);
+        updateFloatingStatus(`✅ 已发送: 吮吸${s} 震动${v}`);
+        // 注入 user 消息
+        if (state.boundConvId) {
+          try {
+            await injectUserMessage(state.boundConvId, `（手动调整玩具：吮吸${s}档 震动${v}档）`);
+          } catch(_) {}
+        }
+      } else {
+        updateFloatingStatus('❌ 发送失败', true);
+      }
+    });
+
+    // 停止
+    panel.querySelector('#toy-fp-stop').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!state.isConnected) return;
+      await sendStop();
+      sucSlider.value = 0; panel.querySelector('#toy-fp-suc-val').textContent = '0';
+      vibSlider.value = 0; panel.querySelector('#toy-fp-vib-val').textContent = '0';
+      updateValues(0, 0);
+      cancelSequence();
+      updateFloatingStatus('⏹ 已停止');
+      if (state.boundConvId) {
+        try { await injectUserMessage(state.boundConvId, '（停止了玩具）'); } catch(_) {}
+      }
+    });
+
+    // 连接/断开
+    panel.querySelector('#toy-fp-connect').addEventListener('click', async (e) => {
+      e.stopPropagation();
       if (state.isConnected) {
         disconnectBluetooth();
       } else {
+        updateFloatingStatus('正在连接...');
         await connectBluetooth();
       }
       refreshFloatingPanel();
-    };
-    panel.querySelector('#toy-fp-stop').onclick = async () => {
-      await sendStop();
-      refreshFloatingPanel();
-    };
-    panel.querySelector('#toy-fp-monitor').onclick = () => {
+    });
+
+    // 监控
+    panel.querySelector('#toy-fp-monitor').addEventListener('click', (e) => {
+      e.stopPropagation();
       if (state.isMonitoring) {
         stopMonitor();
+        updateFloatingStatus('监控已停止');
       } else {
         if (!state.boundConvId) {
           updateFloatingStatus('❌ 请先在设置里绑定会话', true);
@@ -206,18 +304,55 @@
           return;
         }
         startMonitor();
+        updateFloatingStatus('✅ 监控已启动');
       }
       refreshFloatingPanel();
-    };
-    panel.querySelector('#toy-fp-app').onclick = () => {
+    });
+
+    // 预设序列展开/收起
+    panel.querySelector('#toy-fp-preset').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const presets = panel.querySelector('#toy-fp-presets');
+      presets.style.display = presets.style.display === 'none' ? 'block' : 'none';
+    });
+
+    // 预设按钮
+    panel.querySelectorAll('.toy-preset-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!state.isConnected) {
+          updateFloatingStatus('❌ 请先连接蓝牙', true);
+          return;
+        }
+        const preset = btn.dataset.preset;
+        const sequences = {
+          wave: [{suction:1,vibration:1,duration:1.5},{suction:2,vibration:2,duration:1.5},{suction:3,vibration:3,duration:2},{suction:2,vibration:2,duration:1.5},{suction:1,vibration:1,duration:1.5}],
+          pulse: [{suction:0,vibration:0,duration:0.5},{suction:3,vibration:3,duration:0.5},{suction:0,vibration:0,duration:0.5},{suction:3,vibration:3,duration:0.5}],
+          tease: [{suction:1,vibration:0,duration:2},{suction:0,vibration:1,duration:2},{suction:2,vibration:1,duration:2},{suction:1,vibration:2,duration:2}],
+          max: [{suction:3,vibration:3,duration:5}]
+        };
+        const steps = sequences[preset];
+        if (!steps) return;
+        cancelSequence();
+        playSequence(steps, '悬浮窗预设');
+        updateFloatingStatus(`▶ 正在播放预设序列（循环）`);
+        if (state.boundConvId) {
+          try { await injectUserMessage(state.boundConvId, `（启动了预设序列）`); } catch(_) {}
+        }
+      });
+    });
+
+    // 打开设置
+    panel.querySelector('#toy-fp-app').addEventListener('click', (e) => {
+      e.stopPropagation();
       closeFloatingPanel();
-      try { state.roche.ui.openApp('toy-controller-home'); } catch(e) {}
-    };
+      try { state.roche.ui.openApp('toy-controller-home'); } catch(_) {}
+    });
 
     // 点击外部关闭
     setTimeout(() => {
-      document.addEventListener('click', closePanelOnOutside);
-    }, 100);
+      document.addEventListener('pointerdown', closePanelOnOutside);
+    }, 200);
 
     refreshFloatingPanel();
   }
@@ -234,6 +369,7 @@
       state.floatingPanel = null;
     }
     state.ballPanelOpen = false;
+    document.removeEventListener('pointerdown', closePanelOnOutside);
     document.removeEventListener('click', closePanelOnOutside);
   }
 
@@ -1479,7 +1615,7 @@
   window.RochePlugin.register({
     id: 'ai-toy-controller',
     name: 'AI 玩具控制 (ANKNI MX)',
-    version: '6.4.1',
+    version: '6.5.0',
     description: 'ANKNI MX 双电机独立控制 - 悬浮球常驻，实时监控聊天 <vi> 指令自动控制玩具，支持序列循环播放与消息注入，兼容 Web Bluetooth / Capacitor BLE。',
     author: 'Roche 社区',
     apps: [pluginApp]
