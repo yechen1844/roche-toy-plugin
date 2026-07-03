@@ -311,14 +311,14 @@
         }
       } else {
         if (!state.deviceId) throw new Error('未连接');
-        // 创建独立 ArrayBuffer 副本，避免 byteOffset 问题
-        const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-        const dataView = new DataView(ab);
+        // Capacitor BLE Android 端期望 value 是 hex 字符串（如 "aa01020300ad"）
+        // 不是 DataView（DataView 传过去 getString 返回 null，报 "Value required"）
+        const hexStr = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join('');
         await this.capBle.write({
           deviceId: state.deviceId,
           service: SERVICE_UUID,
           characteristic: WRITE_UUID,
-          value: dataView
+          value: hexStr
         });
       }
     },
@@ -352,8 +352,21 @@
           // 事件名格式: notification|service|characteristic
           const eventName = `notification|${SERVICE_UUID}|${NOTIFY_UUID}`;
           const handle = await this.capBle.addListener(eventName, (event) => {
-            // event.value 是 DataView
-            callback(new Uint8Array(event.value.buffer));
+            // Android 端 event.value 是 hex 字符串，需要转成 Uint8Array
+            let arr;
+            if (typeof event.value === 'string') {
+              arr = new Uint8Array(event.value.length / 2);
+              for (let i = 0; i < arr.length; i++) {
+                arr[i] = parseInt(event.value.substr(i * 2, 2), 16);
+              }
+            } else if (event.value instanceof DataView) {
+              arr = new Uint8Array(event.value.buffer);
+            } else if (event.value && event.value.buffer) {
+              arr = new Uint8Array(event.value.buffer);
+            } else {
+              arr = new Uint8Array(event.value || []);
+            }
+            callback(arr);
           });
           trackCapacitorListener(handle);
         } catch (e) {
@@ -1254,7 +1267,7 @@
   window.RochePlugin.register({
     id: 'ai-toy-controller',
     name: 'AI 玩具控制 (ANKNI MX)',
-    version: '6.2.0',
+    version: '6.3.0',
     description: 'ANKNI MX 双电机独立控制 - 实时监控聊天 <vi> 指令自动控制玩具，支持序列循环播放与消息注入，兼容 Web Bluetooth / Capacitor BLE。',
     author: 'Roche 社区',
     apps: [pluginApp]
