@@ -202,6 +202,11 @@
         <button id="toy-fp-app" style="flex:1;min-width:80px;padding:8px;background:#9c27b0;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">打开设置</button>
       </div>
 
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button id="toy-fp-hide-ball" style="flex:1;min-width:80px;padding:8px;background:#607d8b;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;">隐藏悬浮球</button>
+        <button id="toy-fp-show-ball" style="flex:1;min-width:80px;padding:8px;background:#795548;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;display:none;">显示悬浮球</button>
+      </div>
+
       <div id="toy-fp-presets" style="display:none;margin-bottom:8px;padding:8px;background:rgba(255,255,255,0.05);border-radius:8px;">
         <div style="font-size:11px;opacity:0.7;margin-bottom:6px;">点击运行预设序列（循环播放）</div>
         <div style="display:flex;flex-direction:column;gap:4px;">
@@ -347,6 +352,41 @@
       e.stopPropagation();
       closeFloatingPanel();
       try { state.roche.ui.openApp('toy-controller-home'); } catch(_) {}
+    });
+
+    // 隐藏悬浮球（变小变透明放角落）
+    panel.querySelector('#toy-fp-hide-ball').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (state.floatingBall) {
+        state.floatingBall.style.width = '20px';
+        state.floatingBall.style.height = '20px';
+        state.floatingBall.style.fontSize = '0px';
+        state.floatingBall.style.opacity = '0.3';
+        state.floatingBall.style.right = '4px';
+        state.floatingBall.style.top = '4px';
+        state.floatingBall.dataset.hidden = '1';
+        // 隐藏状态点
+        if (state.ballStateEl) state.ballStateEl.style.display = 'none';
+      }
+      panel.querySelector('#toy-fp-hide-ball').style.display = 'none';
+      panel.querySelector('#toy-fp-show-ball').style.display = 'block';
+    });
+
+    // 显示悬浮球（恢复）
+    panel.querySelector('#toy-fp-show-ball').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (state.floatingBall) {
+        state.floatingBall.style.width = '56px';
+        state.floatingBall.style.height = '56px';
+        state.floatingBall.style.fontSize = '28px';
+        state.floatingBall.style.opacity = '1';
+        state.floatingBall.style.right = '16px';
+        state.floatingBall.style.top = '45%';
+        delete state.floatingBall.dataset.hidden;
+        if (state.ballStateEl) state.ballStateEl.style.display = '';
+      }
+      panel.querySelector('#toy-fp-hide-ball').style.display = 'block';
+      panel.querySelector('#toy-fp-show-ball').style.display = 'none';
     });
 
     // 点击外部关闭
@@ -1615,7 +1655,7 @@
   window.RochePlugin.register({
     id: 'ai-toy-controller',
     name: 'AI 玩具控制 (ANKNI MX)',
-    version: '6.5.0',
+    version: '6.6.0',
     description: 'ANKNI MX 双电机独立控制 - 悬浮球常驻，实时监控聊天 <vi> 指令自动控制玩具，支持序列循环播放与消息注入，兼容 Web Bluetooth / Capacitor BLE。',
     author: 'Roche 社区',
     apps: [pluginApp]
