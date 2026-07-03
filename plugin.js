@@ -253,8 +253,11 @@
       } else {
         // Capacitor: 先初始化插件
         await this.capBle.initialize();
+        // Capacitor BLE 的 requestDevice 参数格式与 Web Bluetooth 不同
+        // 不支持 filters: [{name}]，应使用 { name } 直接指定
         const result = await this.capBle.requestDevice({
-          filters: [{ name }]
+          name: name,
+          optionalServices: [SERVICE_UUID]
         });
         state.deviceId = result.deviceId;
         return result.deviceId;
@@ -281,6 +284,12 @@
       } else {
         await this.capBle.connect({ deviceId });
         state.deviceId = deviceId;
+        // Android 必须在连接后手动发现服务，否则 write 会失败
+        try {
+          await this.capBle.discoverServices({ deviceId });
+        } catch (e) {
+          console.log('discoverServices 警告:', e.message || e);
+        }
         // 监听断开事件
         const handle = await this.capBle.addListener('disconnected', (event) => {
           if (event.deviceId === state.deviceId) onDisconnected();
@@ -1245,7 +1254,7 @@
   window.RochePlugin.register({
     id: 'ai-toy-controller',
     name: 'AI 玩具控制 (ANKNI MX)',
-    version: '6.1.0',
+    version: '6.2.0',
     description: 'ANKNI MX 双电机独立控制 - 实时监控聊天 <vi> 指令自动控制玩具，支持序列循环播放与消息注入，兼容 Web Bluetooth / Capacitor BLE。',
     author: 'Roche 社区',
     apps: [pluginApp]
